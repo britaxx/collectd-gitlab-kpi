@@ -143,7 +143,8 @@ def write(key, value, project_id, type_instance, timestamp, interval=300):
     val.plugin_instance = str(project_id)
     val.type_instance = type_instance
     val.values = [int(value)]
-    val.time = timestamp
+# Not more necessary
+#    val.time = timestamp
     val.dispatch(interval=interval)
 #    collectd.info('gitlab_kpi plugin: Write {} with value {}, type_instance {}, plugin_instance {}'.format(
 #        key, value, type_instance, str(project_id)))
