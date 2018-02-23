@@ -92,11 +92,23 @@ def define_next_page(headers):
             return next
     return None
 
+def find_subgroup(group_name):
+    '''
+        Find Subgroup of group
+    '''
+    url = URL + '/groups/{}/subgroups'.format(group_name)
+    data, headers = make_resquest(url=url)
+    for subgroup in data:
+        GROUPS.append(subgroup.get('id'))
+        find_subgroup(subgroup.get('id'))
+
 
 def crawl_groups():
     '''
       Crawl Groups and fetch projects in global PROJECTS
     '''
+    for group in GROUPS:
+        find_subgroup(group)
     for group in GROUPS:
         url = URL + '/groups/{}/projects?simple=1'.format(group)
         data, headers = make_resquest(url=url)
