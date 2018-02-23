@@ -7,6 +7,7 @@
 __author__ = "Alexandre BRIT (@britaxx)"
 __maintainer__ = "Alexandre BRIT"
 
+from multiprocessing import Queue
 import collectd
 import urllib3
 import urllib3.contrib.pyopenssl
@@ -19,6 +20,10 @@ URL = "https://gitlab.example.com"
 PRIVATE_TOKEN = "vfvsdvdshgkawhgsk5gse"
 GROUPS = []
 PROJECTS = []  # Not implement yet
+# Pool manager for requests
+urllib3.contrib.pyopenssl.inject_into_urllib3()
+http = urllib3.PoolManager(cert_reqs='CERT_REQUIRED',
+                           ca_certs=certifi.where(), num_pools=50)
 
 
 def config_func(config):
@@ -53,7 +58,6 @@ def config_func(config):
     collectd.info('gitlab_kpi plugin: Using Token "%s"' % PRIVATE_TOKEN)
     collectd.info('gitlab_kpi plugin: Using Groups %s' % GROUPS)
 
-
 def make_resquest(url, method='GET',
                   headers={'PRIVATE-TOKEN': PRIVATE_TOKEN},
                   body=None):
@@ -62,9 +66,6 @@ def make_resquest(url, method='GET',
        Return response data and headers
     '''
 #    print('gitlab_kpi plugin: Checking "%s"' % url)
-    urllib3.contrib.pyopenssl.inject_into_urllib3()
-    http = urllib3.PoolManager(cert_reqs='CERT_REQUIRED',
-                               ca_certs=certifi.where())
     response = http.request('GET', url, body=body,
                             headers={'PRIVATE-TOKEN': PRIVATE_TOKEN})
     r_data = json.loads(response.data.decode('utf-8'))
@@ -109,11 +110,15 @@ def crawl_groups():
             pagination = define_pagination(headers)
 
 
-def get_x_total(url):
+def get_x_total(q, url, key, project_id, project_name):
     '''
        Return X-total from headers
     '''
     data, headers = make_resquest(url=url)
+    q.put({'key': key,
+           'total': headers.get('X-Total', 0),
+           'project_id': project_id,
+           'project_name': project_name})
     return headers.get('X-Total', 0)
 
 
@@ -128,8 +133,20 @@ def write(key, value, project_id, type_instance, timestamp, interval=300):
     val.values = [int(value)]
     val.time = timestamp
     val.dispatch(interval=interval)
-    collectd.info('gitlab_kpi plugin: Write {} with value {} and type_instance {}'.format(key, value, type_instance))
+#    collectd.info('gitlab_kpi plugin: Write {} with value {}, type_instance {}, plugin_instance {}'.format(
+#        key, value, type_instance, str(project_id)))
 
+def consume_queue(q, timestamp):
+    '''
+       Consume Queue that Process generated
+    '''
+    while not q.empty():
+        values = q.get()
+        total = values.get('total', 0)
+        key =  values.get('key', None)
+        project_id = values.get('project_id', None)
+        project_name = values.get('project_name', None)
+        write(key, total, project_id, project_name, timestamp)
 
 def read_func():
     '''
@@ -137,33 +154,32 @@ def read_func():
     '''
     crawl_groups()
     timestamp = int(time.time())
+
+    q1 = Queue()
+    all_args = [
+        ('/issues?state=opened', 'gitlab_kpi_issue_opened'),
+        ('/issues?state=closed', 'gitlab_kpi_issue_closed'),
+        ('/jobs?scope[]=pending&scope[]=running', 'gitlab_kpi_in_progress_jobs'),
+        ('/jobs?scope[]=failed', 'gitlab_kpi_failed_jobs'),
+        ('/jobs?scope[]=success', 'gitlab_kpi_success_jobs'),
+        ('/repository/commits', 'gitlab_kpi_commits'),
+        ('/merge_requests?state=opened', 'gitlab_kpi_merge_requests_opened'),
+        ('/merge_requests?state=closed', 'gitlab_kpi_merge_requests_closed'),
+        ('/merge_requests?state=merged', 'gitlab_kpi_merge_requests_merged'),
+    ]
     collectd.info('gitlab_kpi plugin: Start kpi collection')
     for page in PROJECTS:
         for project in page:
             url = URL + '/projects/{}'.format(project.get('id'))
             type_instance = 'project_{}'.format(project.get('name'))
 
-            opened_issue = get_x_total(url + '/issues?state=opened')
-            closed_issue = get_x_total(url + '/issues?state=closed')
-            in_progress_jobs = get_x_total(url + '/jobs?scope[]=pending&scope[]=running')
-            failed_jobs = get_x_total(url + '/jobs?scope[]=failed')
-            success_jobs = get_x_total(url + '/jobs?scope[]=success')
-            commits = get_x_total(url + '/repository/commits')
-            merge_requests_opened = get_x_total(url + '/merge_requests?state=opened')
-            merge_requests_closed = get_x_total(url + '/merge_requests?state=closed')
-            merge_requests_merged = get_x_total(url + '/merge_requests?state=merged')
+            for get_parameter, key in all_args:
+                get_x_total(q1, url + get_parameter,
+                key, project.get('id'), type_instance)
 
-            write('gitlab_kpi_issue_opened', opened_issue, project.get('id'), type_instance, timestamp)
-            write('gitlab_kpi_issue_closed', closed_issue, project.get('id'), type_instance, timestamp)
-            write('gitlab_kpi_in_progress_jobs', in_progress_jobs, project.get('id'), type_instance, timestamp)
-            write('gitlab_kpi_failed_jobs', failed_jobs, project.get('id'), type_instance, timestamp)
-            write('gitlab_kpi_success_jobs', success_jobs, project.get('id'), type_instance, timestamp)
-            write('gitlab_kpi_commits', commits, project.get('id'), type_instance, timestamp)
-            write('gitlab_kpi_merge_requests_opened', merge_requests_opened, project.get('id'), type_instance, timestamp)
-            write('gitlab_kpi_merge_requests_closed', merge_requests_closed, project.get('id'), type_instance, timestamp)
-            write('gitlab_kpi_merge_requests_merged', merge_requests_merged, project.get('id'), type_instance, timestamp)
-
-    collectd.info('gitlab_kpi plugin: Stop kpi collection')
+    consume_queue(q1, timestamp)
+    ts = int(time.time())
+    collectd.info('gitlab_kpi plugin: Stop kpi collection in {}s'.format(ts - timestamp))
     return
 
 
